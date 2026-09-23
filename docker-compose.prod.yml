@@ -26,7 +26,9 @@ services:
       context: .
       target: deps
     env_file:
-      - ../.env
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
     command: yarn prisma migrate deploy
     depends_on:
       postgres:
@@ -42,8 +44,9 @@ services:
     container_name: vetensino-api
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ./.env
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
       PORT: 4000
     expose:
       - "4000"

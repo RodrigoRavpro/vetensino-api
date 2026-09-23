@@ -11,6 +11,7 @@ import { buildHealthRouter } from './modules/health/presentation/health.routes';
 import { buildStorageRoutes } from './modules/storage/presentation/storage.routes';
 import { buildAuthRoutes } from './modules/auth/presentation/auth.routes';
 import { buildAdminCourseRoutes } from './modules/courses/presentation/admin-course.routes';
+import { buildInstructorCourseRoutes } from './modules/courses/presentation/instructor-course.routes';
 import { buildAdminUserRoutes } from './modules/users/presentation/admin-user.routes';
 import { buildPublicCourseRoutes } from './modules/courses/presentation/public-course.routes';
 import { buildCheckoutRoutes, buildCheckoutWebhookRoutes } from './modules/checkout/presentation/checkout.routes';
@@ -38,6 +39,7 @@ export const createApp = (container: Container): Express => {
   api.use('/courses', buildPublicCourseRoutes());
   api.use('/checkout', buildCheckoutRoutes());
   api.use('/admin/courses', buildAdminCourseRoutes());
+  api.use('/instructor/courses', buildInstructorCourseRoutes());
   api.use('/admin/users', buildAdminUserRoutes());
   api.use('/storage', buildStorageRoutes());
   app.use('/api/rest', api);
