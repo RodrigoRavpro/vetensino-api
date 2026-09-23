@@ -1,4 +1,4 @@
-// PurpleVet Cursos — schema isolado (banco `vet_ensino`).
+// VetEnsino — schema isolado (banco `vet_ensino`).
 // Nenhuma relação com o banco `purple_vet` do purple-api.
 
 generator client {

@@ -13,7 +13,7 @@ const bootstrap = async (): Promise<void> => {
   const app = createApp(container);
 
   const server = app.listen(env.port, () => {
-    logger.info(`purple-cursos-api ouvindo na porta ${env.port} (${env.nodeEnv})`);
+    logger.info(`vetensino-api ouvindo na porta ${env.port} (${env.nodeEnv})`);
   });
 
   const shutdown = (signal: string) => async (): Promise<void> => {

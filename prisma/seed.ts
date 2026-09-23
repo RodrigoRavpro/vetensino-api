@@ -10,11 +10,11 @@ async function main() {
     return;
   }
 
-  const devPassword = await bcrypt.hash('PurpleVet@Dev2026', 12);
+  const devPassword = await bcrypt.hash('VetEnsino@Dev2026', 12);
   const devUsers = [
-    { email: 'dev-admin@purplevet.local', name: 'Dev Admin', role: UserRole.ADMIN },
-    { email: 'dev-teacher@purplevet.local', name: 'Dev Docente', role: UserRole.TEACHER },
-    { email: 'dev-student@purplevet.local', name: 'Dev Aluno', role: UserRole.STUDENT },
+    { email: 'dev-admin@vetensino.local', name: 'Dev Admin', role: UserRole.ADMIN },
+    { email: 'dev-teacher@vetensino.local', name: 'Dev Docente', role: UserRole.TEACHER },
+    { email: 'dev-student@vetensino.local', name: 'Dev Aluno', role: UserRole.STUDENT },
   ];
 
   for (const devUser of devUsers) {

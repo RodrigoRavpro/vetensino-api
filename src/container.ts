@@ -16,7 +16,7 @@ export const buildContainer = () => {
     useCases: {
       getHealthStatus: new GetHealthStatusUseCase(
         healthProbes,
-        'purple-cursos-api',
+        'vetensino-api',
         APP_VERSION,
         env.nodeEnv,
       ),

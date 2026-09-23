@@ -72,7 +72,7 @@ export const buildAuthRoutes = (): Router => {
       if (!parsed.success) throw new ValidationError('Perfil inválido', parsed.error.flatten());
 
       const role = parsed.data.role;
-      const email = `dev-${role.toLowerCase()}@purplevet.local`;
+      const email = `dev-${role.toLowerCase()}@vetensino.local`;
       const user = await prisma.user.upsert({
         where: { email },
         update: { isActive: true, role },

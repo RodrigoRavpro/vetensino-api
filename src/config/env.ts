@@ -32,8 +32,8 @@ const envSchema = z.object({
 
   RESEND_API_KEY: z.string().optional(),
   RESEND_WEBHOOK_SECRET: z.string().optional(),
-  EMAIL_FROM: z.string().email().default('noreply@purplevet.com.br'),
-  EMAIL_FROM_NAME: z.string().default('PurpleVet Cursos'),
+  EMAIL_FROM: z.string().email().default('noreply@vetensino.com.br'),
+  EMAIL_FROM_NAME: z.string().default('VetEnsino'),
   ADMIN_EMAIL: z.string().email().optional().or(z.literal('')),
 
   FINPET_BASE_URL: z.string().optional(),
@@ -55,7 +55,7 @@ const envSchema = z.object({
   AWS_REGION: z.string().default('sa-east-1'),
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
-  AWS_S3_BUCKET: z.string().default('purple-vet-cursos'),
+  AWS_S3_BUCKET: z.string().default('vetensino'),
   AWS_S3_PREFIX: z.string().default(''),
 });
 
