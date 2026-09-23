@@ -24,12 +24,10 @@ export const uploadToS3 = async ({
   buffer,
   key,
   contentType,
-  acl = 'public-read',
 }: {
   buffer: Buffer;
   key: string;
   contentType: string;
-  acl?: 'public-read' | 'private';
 }): Promise<string> => {
   if (!s3Client) {
     throw new Error('S3 não configurado. Defina AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY.');
@@ -37,13 +35,13 @@ export const uploadToS3 = async ({
 
   const s3Key = buildS3Key(key);
 
+  // O bucket usa "Bucket owner enforced"; acesso público é via bucket policy, não ACL de objeto.
   await s3Client.send(
     new PutObjectCommand({
       Bucket: env.storage.bucket,
       Key: s3Key,
       Body: buffer,
       ContentType: contentType,
-      ACL: acl,
     }),
   );
 

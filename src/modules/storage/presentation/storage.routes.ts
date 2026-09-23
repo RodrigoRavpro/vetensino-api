@@ -50,7 +50,6 @@ export const buildStorageRoutes = (): Router => {
         key: targetKey,
         buffer,
         contentType: file.mimeType,
-        acl: 'private',
       });
 
       res.status(201).json({
