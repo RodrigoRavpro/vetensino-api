@@ -19,7 +19,7 @@ const uploadSchema = z.object({
 
 export const buildStorageRoutes = (): Router => {
   const router = Router();
-  router.use(authenticate, requireRole(UserRole.ADMIN));
+  router.use(authenticate, requireRole(UserRole.ADMIN, UserRole.TEACHER));
 
   router.post(
     '/upload',
@@ -55,6 +55,7 @@ export const buildStorageRoutes = (): Router => {
 
       res.status(201).json({
         success: true,
+        url: result.url,
         key: result.key,
         originalName: file.fileName,
         mimeType: file.mimeType,
