@@ -32,7 +32,17 @@ const redact = (value: unknown, depth = 0): unknown => {
   );
 };
 
-const redactFormat = winston.format((info) => redact(info) as winston.Logform.TransformableInfo);
+const redactFormat = winston.format((info) => {
+  // Muta o mesmo objeto (em vez de reconstruir com Object.fromEntries) para
+  // preservar os Symbols internos do winston (level/message), sem os quais
+  // o pipeline de formatação para de escrever qualquer log silenciosamente.
+  for (const key of Object.keys(info)) {
+    (info as Record<string, unknown>)[key] = SENSITIVE_KEYS.has(key.toLowerCase())
+      ? REDACTED
+      : redact((info as Record<string, unknown>)[key], 1);
+  }
+  return info as winston.Logform.TransformableInfo;
+});
 
 export const logger = winston.createLogger({
   level: env.logLevel,
