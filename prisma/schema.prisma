@@ -1,0 +1,840 @@
+// PurpleVet Cursos — schema isolado (banco `vet_ensino`).
+// Nenhuma relação com o banco `purple_vet` do purple-api.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  ADMIN
+}
+
+enum CourseStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ClassStatus {
+  DRAFT
+  OPEN
+  FULL
+  CLOSED
+  CANCELED
+}
+
+enum ClassFormat {
+  ONLINE
+  IN_PERSON
+  HYBRID
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONVERTED
+  EXPIRED
+  CANCELED
+}
+
+enum WaitlistStatus {
+  WAITING
+  INVITED
+  ENROLLED
+  CANCELED
+  EXPIRED
+}
+
+enum FileVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum FileStatus {
+  ACTIVE
+  REPLACED
+  DELETED
+  UNDER_REVIEW
+}
+
+enum LessonType {
+  VIDEO
+  TEXT
+  PDF
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  COMPLETED
+  SUSPENDED
+  EXPIRED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELED
+  REFUNDED
+  FAILED
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  PIX
+  CREDIT_CARD
+}
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+  BOUNCED
+}
+
+enum EmailEventType {
+  SENT
+  DELIVERED
+  DELIVERY_DELAYED
+  OPENED
+  CLICKED
+  BOUNCED
+  COMPLAINED
+}
+
+enum AuthEventType {
+  LOGIN
+  LOGOUT
+  LOGIN_FAILED
+  ACCOUNT_LOCKED
+  CAPTCHA_REQUIRED
+  CAPTCHA_FAILED
+  SESSION_REVOKED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_CHANGED
+  PASSWORD_DEFINED
+  EMAIL_VERIFIED
+  IP_CHANGED
+  DEVICE_CHANGED
+}
+
+enum AuditSeverity {
+  INFO
+  WARN
+  CRITICAL
+}
+
+enum PaymentEventType {
+  ORDER_CREATED
+  CHECKOUT_GENERATED
+  WEBHOOK_RECEIVED
+  PAYMENT_APPROVED
+  PAYMENT_REJECTED
+  ORDER_EXPIRED
+  ENROLLMENT_GRANTED
+  REFUNDED
+  MANUAL_OVERRIDE
+}
+
+// ============================================================================
+// IDENTIDADE E SESSÃO
+// ============================================================================
+
+/// `password` é nulo para contas criadas via checkout de convidado: o acesso só
+/// nasce quando o comprador define a senha pelo token enviado por e-mail.
+model User {
+  id       String   @id @default(uuid())
+  name     String
+  email    String   @unique
+  password String?
+  role     UserRole @default(STUDENT)
+
+  cpf       String? @unique
+  phone     String?
+  avatarUrl String?
+  bio       String?
+
+  isActive        Boolean   @default(true)
+  emailVerifiedAt DateTime?
+
+  /// Todos os tokens são armazenados como hash SHA-256, nunca em texto puro.
+  emailVerificationTokenHash String?   @unique
+  emailVerificationExpiresAt DateTime?
+  passwordResetTokenHash     String?   @unique
+  passwordResetExpiresAt     DateTime?
+  setPasswordTokenHash       String?   @unique
+  setPasswordExpiresAt       DateTime?
+
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions       UserSession[]
+  coursesTaught  Course[]         @relation("CourseInstructor")
+  orders         Order[]
+  enrollments    Enrollment[]
+  auditLogs      AuditLog[]
+  authEvents     AuthEvent[]
+  emailLogs      EmailLog[]
+  activityLogs   ActivityLog[]
+  paymentEvents  PaymentEvent[]
+  classTeachers  CourseClassTeacher[]
+  uploadedFiles  CourseFile[]
+  reservations   SeatReservation[]
+  waitlistEntries WaitlistEntry[]
+
+  @@index([role])
+  @@index([isActive])
+  @@map("users")
+}
+
+model UserSession {
+  id     String @id @default(uuid())
+  userId String
+
+  /// Hash SHA-256 do JWT: vazamento do banco não permite reuso do token.
+  tokenHash  String  @unique
+  ipAddress  String?
+  deviceInfo String?
+
+  isActive   Boolean  @default(true)
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  authEvents AuthEvent[]
+
+  @@index([userId])
+  @@index([isActive, expiresAt])
+  @@map("user_sessions")
+}
+
+// ============================================================================
+// CATÁLOGO
+// ============================================================================
+
+model Course {
+  id       String @id @default(uuid())
+  slug     String @unique
+  title    String
+  subtitle String?
+
+  description String?
+  contentJson Json?
+
+  coverImageUrl String?
+  promoVideoUrl String?
+
+  price      Decimal  @db.Decimal(10, 2)
+  promoPrice Decimal? @db.Decimal(10, 2)
+
+  workloadHours      Int?
+  status             CourseStatus @default(DRAFT)
+  /// Nulo = acesso vitalício.
+  accessDurationDays Int?
+  certificateEnabled Boolean      @default(true)
+
+  instructorId String?
+  publishedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  instructor  User?          @relation("CourseInstructor", fields: [instructorId], references: [id], onDelete: SetNull)
+  modules     CourseModule[]
+  classes     CourseClass[]
+  enrollments Enrollment[]
+  orderItems  OrderItem[]
+  files       CourseFile[]
+
+  @@index([status])
+  @@index([instructorId])
+  @@map("courses")
+}
+
+model CourseClass {
+  id                 String      @id @default(uuid())
+  courseId           String
+  name               String
+  code               String?
+  status             ClassStatus @default(DRAFT)
+  format             ClassFormat @default(ONLINE)
+  capacity           Int
+  startsAt           DateTime?
+  endsAt             DateTime?
+  enrollmentStartsAt DateTime?
+  enrollmentEndsAt   DateTime?
+  locationName       String?
+  address            String?
+  city               String?
+  state              String?
+  onlineUrl          String?
+  notes              String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course       Course              @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  teachers     CourseClassTeacher[]
+  schedule     ClassSchedule[]
+  timeline     ClassTimelineItem[]
+  enrollments  Enrollment[]
+  reservations SeatReservation[]
+  waitlist     WaitlistEntry[]
+  orderItems   OrderItem[]
+  files        CourseFile[]
+
+  @@index([courseId, status])
+  @@index([startsAt])
+  @@map("course_classes")
+}
+
+model CourseClassTeacher {
+  classId   String
+  teacherId String
+  createdAt DateTime @default(now())
+
+  class   CourseClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacher User        @relation(fields: [teacherId], references: [id], onDelete: Restrict)
+
+  @@id([classId, teacherId])
+  @@index([teacherId])
+  @@map("course_class_teachers")
+}
+
+model ClassSchedule {
+  id           String   @id @default(uuid())
+  classId      String
+  weekday      Int?
+  date         DateTime?
+  startsAt     DateTime
+  endsAt       DateTime
+  breakMinutes Int?
+  location     String?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  class CourseClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@index([classId, startsAt])
+  @@map("class_schedules")
+}
+
+model ClassTimelineItem {
+  id          String   @id @default(uuid())
+  classId     String
+  title       String
+  description String?
+  objectives  Json?
+  materials   Json?
+  startsAt    DateTime?
+  endsAt      DateTime?
+  order       Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  class CourseClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, order])
+  @@index([classId, startsAt])
+  @@map("class_timeline_items")
+}
+
+model CourseModule {
+  id          String  @id @default(uuid())
+  courseId    String
+  title       String
+  description String?
+  order       Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course  Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons CourseLesson[]
+
+  @@unique([courseId, order])
+  @@index([courseId])
+  @@map("course_modules")
+}
+
+model CourseLesson {
+  id       String     @id @default(uuid())
+  moduleId String
+  title    String
+  type     LessonType @default(VIDEO)
+
+  videoUrl      String?
+  durationSec   Int?
+  contentJson   Json?
+  contentText   String?
+  attachmentUrl String?
+
+  order Int
+  /// Aula liberada na landing pública, sem compra.
+  isPreview Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  module   CourseModule     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  progress LessonProgress[]
+  files    CourseFile[]
+
+  @@unique([moduleId, order])
+  @@index([moduleId])
+  @@map("course_lessons")
+}
+
+// ============================================================================
+// COMERCIAL
+// ============================================================================
+
+model Order {
+  id       String @id @default(uuid())
+  /// Identificador público usado nas URLs de checkout (`curord_...`).
+  publicId String @unique
+
+  userId String?
+  /// Snapshot do e-mail informado no checkout de convidado, usado para
+  /// reconciliar o pedido caso o vínculo com o usuário ainda não exista.
+  guestEmail String?
+  guestName  String?
+
+  status   OrderStatus @default(PENDING)
+  subtotal Decimal     @db.Decimal(10, 2)
+  discount Decimal     @default(0) @db.Decimal(10, 2)
+  total    Decimal     @db.Decimal(10, 2)
+
+  paidAt     DateTime?
+  canceledAt DateTime?
+  expiresAt  DateTime?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  items         OrderItem[]
+  payments      Payment[]
+  enrollments   Enrollment[]
+  paymentEvents PaymentEvent[]
+  reservations  SeatReservation[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([guestEmail])
+  @@map("orders")
+}
+
+/// `courseTitle` e `unitPrice` são snapshots: editar o curso não altera pedidos passados.
+model OrderItem {
+  id          String  @id @default(uuid())
+  orderId     String
+  courseId    String
+  classId     String?
+  courseTitle String
+  unitPrice   Decimal @db.Decimal(10, 2)
+  quantity    Int     @default(1)
+
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  course Course @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  class  CourseClass? @relation(fields: [classId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, courseId])
+  @@index([courseId])
+  @@index([classId])
+  @@map("order_items")
+}
+
+model Payment {
+  id       String @id @default(uuid())
+  orderId  String
+  provider String @default("FINPET")
+
+  /// Chave de idempotência do webhook do gateway.
+  externalId String        @unique
+  method     PaymentMethod
+  status     PaymentStatus @default(PENDING)
+  amount     Decimal       @db.Decimal(10, 2)
+
+  checkoutUrl   String?
+  qrCode        String?
+  qrCodeBase64  String?
+  rawPayload    Json?
+  failureReason String?
+
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentEvents PaymentEvent[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("payments")
+}
+
+/// Log cru de callbacks recebidos, gravado antes de qualquer processamento.
+model WebhookEvent {
+  id       String @id @default(uuid())
+  provider String
+  eventId  String @unique
+
+  payload     Json
+  signatureOk Boolean   @default(false)
+  processedAt DateTime?
+  error       String?
+  receivedAt  DateTime  @default(now())
+
+  @@index([provider])
+  @@index([processedAt])
+  @@map("webhook_events")
+}
+
+// ============================================================================
+// CONSUMO E CERTIFICAÇÃO
+// ============================================================================
+
+model Enrollment {
+  id       String  @id @default(uuid())
+  userId   String
+  courseId String
+  classId  String?
+  /// Nulo em matrícula manual concedida pelo admin.
+  orderId  String?
+
+  status          EnrollmentStatus @default(ACTIVE)
+  progressPercent Int              @default(0)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  expiresAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course      Course           @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  order       Order?           @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  class       CourseClass?     @relation(fields: [classId], references: [id], onDelete: Restrict)
+  progress    LessonProgress[]
+  certificate Certificate?
+
+  @@unique([userId, courseId])
+  @@index([userId])
+  @@index([courseId])
+  @@index([status])
+  @@index([classId, status])
+  @@unique([userId, classId])
+  @@map("enrollments")
+}
+
+model SeatReservation {
+  id        String            @id @default(uuid())
+  classId   String
+  userId    String?
+  orderId   String?
+  email     String?
+  status    ReservationStatus @default(ACTIVE)
+  expiresAt DateTime
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  class CourseClass @relation(fields: [classId], references: [id], onDelete: Restrict)
+  user  User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  order Order?      @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([classId, status, expiresAt])
+  @@index([userId, classId, status])
+  @@unique([orderId])
+  @@map("seat_reservations")
+}
+
+model WaitlistEntry {
+  id        String         @id @default(uuid())
+  classId   String
+  userId    String?
+  email     String
+  name      String?
+  position  Int
+  status    WaitlistStatus @default(WAITING)
+  invitedAt DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  class CourseClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user  User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([classId, position])
+  @@index([classId, status, position])
+  @@index([userId, classId])
+  @@map("waitlist_entries")
+}
+
+model CourseFile {
+  id           String         @id @default(uuid())
+  courseId     String
+  classId      String?
+  lessonId     String?
+  uploadedById String
+  originalName String
+  storageKey   String         @unique
+  mimeType     String
+  extension    String
+  sizeBytes    BigInt
+  checksum     String
+  visibility   FileVisibility @default(PRIVATE)
+  status       FileStatus     @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  course     Course        @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  class      CourseClass?  @relation(fields: [classId], references: [id], onDelete: Restrict)
+  lesson     CourseLesson? @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  uploadedBy User          @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([courseId, status])
+  @@index([classId, status])
+  @@index([lessonId, status])
+  @@index([uploadedById])
+  @@map("course_files")
+}
+
+model LessonProgress {
+  id           String @id @default(uuid())
+  enrollmentId String
+  lessonId     String
+
+  completed      Boolean   @default(false)
+  secondsWatched Int       @default(0)
+  completedAt    DateTime?
+  lastAccessAt   DateTime  @default(now())
+
+  enrollment Enrollment   @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  lesson     CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([enrollmentId, lessonId])
+  @@index([enrollmentId])
+  @@map("lesson_progress")
+}
+
+model Certificate {
+  id           String @id @default(uuid())
+  enrollmentId String @unique
+
+  /// Código de alta entropia exibido no PDF e usado na validação pública.
+  validationCode String @unique
+
+  studentName   String
+  studentCpf    String?
+  courseTitle   String
+  workloadHours Int?
+
+  pdfUrl    String?
+  issuedAt  DateTime  @default(now())
+  revokedAt DateTime?
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@index([validationCode])
+  @@map("certificates")
+}
+
+// ============================================================================
+// OBSERVABILIDADE
+// ============================================================================
+
+/// Append-only: nunca atualizar nem excluir registros desta tabela.
+model AuditLog {
+  id String @id @default(uuid())
+
+  actorId    String?
+  actorEmail String?
+  actorRole  String?
+
+  action     String
+  entityType String?
+  entityId   String?
+
+  before Json?
+  after  Json?
+
+  ipAddress String?
+  userAgent String?
+  severity  AuditSeverity @default(INFO)
+  createdAt DateTime      @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model AuthEvent {
+  id     String  @id @default(uuid())
+  userId String?
+  /// E-mail tentado, gravado mesmo quando a conta não existe.
+  email  String
+
+  type    AuthEventType
+  success Boolean       @default(false)
+  reason  String?
+
+  ipAddress String?
+  userAgent String?
+  sessionId String?
+  createdAt DateTime @default(now())
+
+  user    User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  session UserSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([email])
+  @@index([type])
+  @@index([createdAt])
+  @@map("auth_events")
+}
+
+model EmailLog {
+  id       String @id @default(uuid())
+  template String
+  to       String
+  subject  String
+
+  userId     String?
+  entityType String?
+  entityId   String?
+
+  status            EmailStatus @default(PENDING)
+  attempts          Int         @default(0)
+  /// Id da mensagem no Resend, usado para correlacionar os eventos do webhook.
+  providerMessageId String?
+  errorMessage      String?
+  payload           Json?
+
+  sentAt      DateTime?
+  nextRetryAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user   User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  events EmailEvent[]
+
+  @@index([status])
+  @@index([template])
+  @@index([status, nextRetryAt])
+  @@index([userId])
+  @@index([providerMessageId])
+  @@map("email_logs")
+}
+
+model EmailEvent {
+  id                String @id @default(uuid())
+  emailLogId        String?
+  providerMessageId String
+
+  type    EmailEventType
+  linkUrl String?
+
+  ipAddress  String?
+  userAgent  String?
+  payload    Json?
+  occurredAt DateTime @default(now())
+
+  emailLog EmailLog? @relation(fields: [emailLogId], references: [id], onDelete: SetNull)
+
+  @@unique([providerMessageId, type, occurredAt])
+  @@index([emailLogId])
+  @@index([type])
+  @@map("email_events")
+}
+
+model RequestLog {
+  id         String @id @default(uuid())
+  method     String
+  /// Path normalizado com placeholders (`/courses/:id`) para permitir agregação.
+  path       String
+  statusCode Int
+  durationMs Int
+
+  userId    String?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([statusCode])
+  @@index([path])
+  @@index([createdAt])
+  @@map("request_logs")
+}
+
+model ActivityLog {
+  id        String  @id @default(uuid())
+  userId    String
+  sessionId String?
+
+  path       String
+  label      String?
+  entityType String?
+  entityId   String?
+  durationMs Int?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
+
+model PaymentEvent {
+  id        String  @id @default(uuid())
+  orderId   String
+  paymentId String?
+
+  type    PaymentEventType
+  message String?
+  payload Json?
+  actorId String?
+
+  createdAt DateTime @default(now())
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  actor   User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("payment_events")
+}
