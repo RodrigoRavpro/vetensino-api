@@ -71,5 +71,5 @@ volumes:
 
 networks:
   vetensino-network:
+    external: true
     name: vetensino-network
-    driver: bridge
