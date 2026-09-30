@@ -46,6 +46,11 @@ export const buildCheckoutRoutes = (): Router => {
       const order = await transaction.order.create({ data: { publicId, guestEmail: input.email.toLowerCase(), guestName: input.name, status: 'PENDING', subtotal: price, total: price, items: { create: { courseId: course.id, classId: courseClass.id, courseTitle: course.title, unitPrice: price } }, payments: { create: { externalId: `local_${crypto.randomUUID()}`, method: input.paymentMethod, amount: price, provider: env.payments.isConfigured ? 'FINPET' : 'LOCAL' } }, reservations: { create: { classId: courseClass.id, email: input.email.toLowerCase(), expiresAt: reservationExpiresAt } } }, select: { id: true, publicId: true, total: true, payments: { select: { id: true } } } });
       const payment = order.payments[0];
       if (!payment) throw new Error('Pagamento não criado para o pedido');
+      // Checkout não pago aparece ao docente como pré-inscrição; nova tentativa do mesmo e-mail reaproveita o registro.
+      const email = input.email.toLowerCase();
+      const pending = await transaction.coursePreRegistration.findFirst({ where: { courseId: course.id, email, source: 'CHECKOUT', convertedAt: null } });
+      if (pending) await transaction.coursePreRegistration.update({ where: { id: pending.id }, data: { name: input.name, orderId: order.id } });
+      else await transaction.coursePreRegistration.create({ data: { courseId: course.id, name: input.name, email, source: 'CHECKOUT', orderId: order.id } });
       return { kind: 'CHECKOUT' as const, orderId: order.id, paymentId: payment.id, publicId: order.publicId, total: order.total.toString(), reservationExpiresAt, className: courseClass.name, courseTitle: course.title };
     });
 
@@ -101,6 +106,7 @@ const syncPaymentFromProvider = async (publicId: string, status: string): Promis
       }
       if (userId && order.items[0]?.classId) await transaction.enrollment.upsert({ where: { userId_classId: { userId, classId: order.items[0].classId } }, update: { status: 'ACTIVE', orderId: order.id }, create: { userId, courseId: order.items[0].courseId, classId: order.items[0].classId, orderId: order.id, status: 'ACTIVE', startedAt: new Date() } });
       if (order.reservations[0]) await transaction.seatReservation.update({ where: { id: order.reservations[0].id }, data: { status: 'CONVERTED' } });
+      await transaction.coursePreRegistration.updateMany({ where: { orderId: order.id, convertedAt: null }, data: { convertedAt: new Date() } });
     } else if (paymentStatus === 'REJECTED') {
       await transaction.order.update({ where: { id: order.id }, data: { status: 'FAILED', canceledAt: new Date() } });
       if (order.reservations[0]) await transaction.seatReservation.update({ where: { id: order.reservations[0].id }, data: { status: 'CANCELED' } });

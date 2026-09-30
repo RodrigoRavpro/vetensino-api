@@ -101,6 +101,11 @@ enum PaymentMethod {
   CREDIT_CARD
 }
 
+enum PreRegistrationSource {
+  FORM
+  CHECKOUT
+}
+
 enum ManualPaymentMethod {
   PIX
   CREDIT_CARD
@@ -293,10 +298,14 @@ model CoursePreRegistration {
   email     String
   phone     String?
   company   String?
+  source    PreRegistrationSource @default(FORM)
+  /// Pedido de checkout não pago que originou a pré-inscrição.
+  orderId   String?  @unique
   convertedAt DateTime?
   createdAt DateTime @default(now())
 
   course    Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  order     Order?               @relation(fields: [orderId], references: [id], onDelete: SetNull)
   agreement EnrollmentAgreement?
 
   @@index([courseId, createdAt])
@@ -475,6 +484,7 @@ model Order {
   enrollments   Enrollment[]
   paymentEvents PaymentEvent[]
   reservations  SeatReservation[]
+  preRegistration CoursePreRegistration?
 
   @@index([userId])
   @@index([status])

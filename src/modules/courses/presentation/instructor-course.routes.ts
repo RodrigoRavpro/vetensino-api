@@ -308,9 +308,20 @@ export const buildInstructorCourseRoutes = (): Router => {
           orderBy: { createdAt: 'desc' },
           skip: (page - 1) * pageSize,
           take: pageSize,
+          include: { order: { select: { status: true, items: { select: { classId: true }, take: 1 } } } },
         }),
       ]);
-      res.json({ success: true, page, pageSize, total, preRegistrations });
+      res.json({
+        success: true,
+        page,
+        pageSize,
+        total,
+        preRegistrations: preRegistrations.map(({ order, ...registration }) => ({
+          ...registration,
+          orderStatus: order?.status ?? null,
+          classId: order?.items[0]?.classId ?? null,
+        })),
+      });
     }),
   );
 
@@ -329,6 +340,11 @@ export const buildInstructorCourseRoutes = (): Router => {
         // updateMany condicional evita dupla conversão em requisições concorrentes.
         const claimed = await tx.coursePreRegistration.updateMany({ where: { id: registration.id, convertedAt: null }, data: { convertedAt: new Date() } });
         if (claimed.count === 0) throw new ConflictError('Esta pré-inscrição já foi convertida em matrícula');
+        // Pedido de checkout em aberto é cancelado para que um pagamento tardio não gere matrícula duplicada.
+        if (registration.orderId) {
+          const cancelled = await tx.order.updateMany({ where: { id: registration.orderId, status: OrderStatus.PENDING }, data: { status: OrderStatus.CANCELED, canceledAt: new Date() } });
+          if (cancelled.count > 0) await tx.seatReservation.updateMany({ where: { orderId: registration.orderId, status: 'ACTIVE' }, data: { status: 'CANCELED' } });
+        }
 
         if (input.classId) {
           const courseClass = await tx.courseClass.findFirst({ where: { id: input.classId, courseId }, include: { _count: { select: { enrollments: true } } } });
@@ -545,7 +561,7 @@ export const buildInstructorCourseRoutes = (): Router => {
             enrollment.progressPercent, enrollment.createdAt.toISOString(),
           ]),
           ...preRegistrations.map((registration) => [
-            'Pré-inscrição', registration.name ?? '', registration.email, registration.phone ?? '', registration.company ?? '', '',
+            registration.source === 'CHECKOUT' ? 'Checkout não pago' : 'Pré-inscrição', registration.name ?? '', registration.email, registration.phone ?? '', registration.company ?? '', '',
             'Pendente', '', registration.createdAt.toISOString(),
           ]),
         ],
