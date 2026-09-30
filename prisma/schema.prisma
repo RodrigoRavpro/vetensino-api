@@ -101,6 +101,16 @@ enum PaymentMethod {
   CREDIT_CARD
 }
 
+enum ManualPaymentMethod {
+  PIX
+  CREDIT_CARD
+  DEBIT_CARD
+  BOLETO
+  BANK_TRANSFER
+  CASH
+  OTHER
+}
+
 enum EmailStatus {
   PENDING
   SENT
@@ -201,6 +211,8 @@ model User {
   uploadedFiles  CourseFile[]
   reservations   SeatReservation[]
   waitlistEntries WaitlistEntry[]
+  enrollmentAgreements EnrollmentAgreement[] @relation("EnrollmentAgreementCreator")
+  enrollmentDocuments  EnrollmentDocument[]  @relation("EnrollmentDocumentUploader")
 
   @@index([role])
   @@index([isActive])
@@ -265,12 +277,31 @@ model Course {
   modules     CourseModule[]
   classes     CourseClass[]
   enrollments Enrollment[]
+  preRegistrations CoursePreRegistration[]
   orderItems  OrderItem[]
   files       CourseFile[]
 
   @@index([status])
   @@index([instructorId])
   @@map("courses")
+}
+
+model CoursePreRegistration {
+  id        String   @id @default(uuid())
+  courseId  String
+  name      String?
+  email     String
+  phone     String?
+  company   String?
+  convertedAt DateTime?
+  createdAt DateTime @default(now())
+
+  course    Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  agreement EnrollmentAgreement?
+
+  @@index([courseId, createdAt])
+  @@index([email])
+  @@map("course_pre_registrations")
 }
 
 model CourseClass {
@@ -545,6 +576,7 @@ model Enrollment {
   class       CourseClass?     @relation(fields: [classId], references: [id], onDelete: Restrict)
   progress    LessonProgress[]
   certificate Certificate?
+  agreement   EnrollmentAgreement?
 
   @@unique([userId, courseId])
   @@index([userId])
@@ -553,6 +585,47 @@ model Enrollment {
   @@index([classId, status])
   @@unique([userId, classId])
   @@map("enrollments")
+}
+
+/// Condições negociadas pelo docente ao converter uma pré-inscrição em matrícula manual.
+model EnrollmentAgreement {
+  id                String              @id @default(uuid())
+  enrollmentId      String              @unique
+  preRegistrationId String?             @unique
+  negotiatedPrice   Decimal             @db.Decimal(10, 2)
+  paymentMethod     ManualPaymentMethod
+  installments      Int                 @default(1)
+  amountPaid        Decimal             @default(0) @db.Decimal(10, 2)
+  notes             String?
+  createdById       String
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  enrollment      Enrollment             @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  preRegistration CoursePreRegistration? @relation(fields: [preRegistrationId], references: [id], onDelete: SetNull)
+  createdBy       User                   @relation("EnrollmentAgreementCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  documents       EnrollmentDocument[]
+
+  @@index([createdById])
+  @@map("enrollment_agreements")
+}
+
+model EnrollmentDocument {
+  id           String   @id @default(uuid())
+  agreementId  String
+  uploadedById String
+  originalName String
+  storageKey   String   @unique
+  mimeType     String
+  sizeBytes    Int
+  createdAt    DateTime @default(now())
+
+  agreement  EnrollmentAgreement @relation(fields: [agreementId], references: [id], onDelete: Cascade)
+  uploadedBy User                @relation("EnrollmentDocumentUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([agreementId])
+  @@index([uploadedById])
+  @@map("enrollment_documents")
 }
 
 model SeatReservation {

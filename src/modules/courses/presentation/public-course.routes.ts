@@ -46,6 +46,10 @@ const publicInclude = {
 
 const preRegistrationFieldSchema = z.enum(['name', 'email', 'phone', 'company']);
 type PreRegistrationField = z.infer<typeof preRegistrationFieldSchema>;
+const optionalRegistrationField = (schema: z.ZodString) => z.preprocess(
+  (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+  schema.optional(),
+);
 const safePreRegistrationContent = (value: unknown) => {
   const content = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const fields: PreRegistrationField[] = Array.isArray(content.preRegistrationFields)
@@ -109,34 +113,46 @@ export const buildPublicCourseRoutes = (): Router => {
     if (!course) throw new NotFoundError('Curso não encontrado');
     const registration = safePreRegistrationContent(course.contentJson);
     const input = z.object({
-      name: z.string().trim().min(2).max(160).optional(),
-      email: z.string().trim().email().max(240).optional(),
-      phone: z.string().trim().regex(/^[0-9+() .-]{8,30}$/).optional(),
-      company: z.string().trim().min(2).max(160).optional(),
+      name: optionalRegistrationField(z.string().trim().min(2).max(160)),
+      email: optionalRegistrationField(z.string().trim().email().max(240)),
+      phone: optionalRegistrationField(z.string().trim().regex(/^[0-9+() .-]{8,30}$/)),
+      company: optionalRegistrationField(z.string().trim().min(2).max(160)),
     }).strict().parse(req.body);
     for (const field of registration.fields) if (!input[field]) throw new AppError(`Campo obrigatório ausente: ${field}`, 422, 'VALIDATION_ERROR');
     if (!input.email) throw new AppError('E-mail é obrigatório', 422, 'VALIDATION_ERROR');
-    if (!env.email.adminEmail) throw new AppError('E-mail de recebimento não configurado', 503, 'EMAIL_NOT_CONFIGURED');
+
+    const savedRegistration = await prisma.coursePreRegistration.create({
+      data: {
+        courseId: course.id,
+        name: input.name ?? null,
+        email: input.email.toLowerCase(),
+        phone: input.phone ?? null,
+        company: input.company ?? null,
+      },
+    });
 
     const subject = `Pré-inscrição: ${course.title}`;
-    const emailLog = await prisma.emailLog.create({ data: { template: 'COURSE_PRE_REGISTRATION', to: env.email.adminEmail, subject, entityType: 'Course', entityId: course.id, payload: input } });
-    if (!env.email.apiKey) {
-      await prisma.emailLog.update({ where: { id: emailLog.id }, data: { status: 'FAILED', attempts: 1, errorMessage: 'RESEND_API_KEY não configurada' } });
-      throw new AppError('Serviço de e-mail não configurado', 503, 'EMAIL_NOT_CONFIGURED');
+    if (env.email.adminEmail) {
+      const emailLog = await prisma.emailLog.create({ data: { template: 'COURSE_PRE_REGISTRATION', to: env.email.adminEmail, subject, entityType: 'CoursePreRegistration', entityId: savedRegistration.id, payload: input } });
+      if (!env.email.apiKey) {
+        await prisma.emailLog.update({ where: { id: emailLog.id }, data: { status: 'FAILED', attempts: 1, errorMessage: 'RESEND_API_KEY não configurada' } });
+      } else {
+        try {
+          const response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${env.email.apiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: `${env.email.fromName} <${env.email.from}>`, to: [env.email.adminEmail], subject, html: `<p>Nova pré-inscrição no curso <strong>${escapeHtml(course.title)}</strong>.</p><dl>${Object.entries(input).map(([key, value]) => `<dt><strong>${escapeHtml(key)}</strong></dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>` }),
+          });
+          const result = await response.json() as { id?: string; message?: string };
+          await prisma.emailLog.update({ where: { id: emailLog.id }, data: response.ok
+            ? { status: 'SENT', attempts: 1, providerMessageId: result.id, sentAt: new Date() }
+            : { status: 'FAILED', attempts: 1, errorMessage: result.message || 'Falha ao enviar e-mail' } });
+        } catch (error) {
+          await prisma.emailLog.update({ where: { id: emailLog.id }, data: { status: 'FAILED', attempts: 1, errorMessage: error instanceof Error ? error.message.slice(0, 500) : 'Falha ao enviar e-mail' } });
+        }
+      }
     }
-
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.email.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: `${env.email.fromName} <${env.email.from}>`, to: [env.email.adminEmail], subject, html: `<p>Nova pré-inscrição no curso <strong>${escapeHtml(course.title)}</strong>.</p><dl>${Object.entries(input).map(([key, value]) => `<dt><strong>${escapeHtml(key)}</strong></dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>` }),
-    });
-    const result = await response.json() as { id?: string; message?: string };
-    if (!response.ok) {
-      await prisma.emailLog.update({ where: { id: emailLog.id }, data: { status: 'FAILED', attempts: 1, errorMessage: result.message || 'Falha ao enviar e-mail' } });
-      throw new AppError('Não foi possível enviar a pré-inscrição', 502, 'EMAIL_SEND_FAILED');
-    }
-    await prisma.emailLog.update({ where: { id: emailLog.id }, data: { status: 'SENT', attempts: 1, providerMessageId: result.id, sentAt: new Date() } });
-    res.status(201).json({ success: true, message: 'Pré-inscrição enviada.' });
+    res.status(201).json({ success: true, message: 'Pré-inscrição recebida e registrada.' });
   }));
 
   router.get('/', asyncHandler(async (_req, res) => {

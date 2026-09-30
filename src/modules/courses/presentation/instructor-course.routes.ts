@@ -1,12 +1,17 @@
-import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
+import express, { Router } from 'express';
 import { z } from 'zod';
-import { EnrollmentStatus, OrderStatus, Prisma, UserRole } from '@prisma/client';
+import { EnrollmentStatus, ManualPaymentMethod, OrderStatus, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../../infrastructure/database/prisma';
+import { deleteFileFromStorage, uploadFileToStorage } from '../../storage/application/uploadFileToStorage';
+import { sendAccessInvite, sendEnrollmentConfirmation } from '../../auth/application/passwordTokens';
+import { buildPublicS3Url } from '../../storage/application/storagePaths';
+import { env } from '../../../config/env';
 import { asyncHandler } from '../../../shared/http/asyncHandler';
 import { authenticate, requireRole } from '../../../shared/http/auth';
 import { requireClassOwnership, requireCourseOwnership, requireEnrollmentOwnership } from '../../../shared/http/ownership';
 import { sensitiveRateLimiter } from '../../../shared/http/security';
-import { ConflictError, NotFoundError, ValidationError } from '../../../shared/errors/AppError';
+import { AppError, ConflictError, NotFoundError, ValidationError } from '../../../shared/errors/AppError';
 import { audit, classInput, prismaJson, publicCourse, sanitizeDescription, toCsv } from './course.shared';
 
 // `instructorId` nunca é aceito no body: sempre o docente autenticado. `.strict()` rejeita
@@ -42,6 +47,38 @@ const paginationSchema = z.object({
   page: z.coerce.number().int().positive().max(10_000).default(1),
   pageSize: z.coerce.number().int().positive().max(100).default(20),
 });
+
+const agreementFields = {
+  negotiatedPrice: z.number().nonnegative().finite().max(1_000_000),
+  paymentMethod: z.nativeEnum(ManualPaymentMethod),
+  installments: z.number().int().min(1).max(48),
+  amountPaid: z.number().nonnegative().finite().max(1_000_000),
+  notes: z.string().trim().max(2_000).optional().nullable(),
+};
+
+const convertPreRegistrationSchema = z
+  .object({
+    name: z.string().trim().min(2).max(160),
+    classId: z.string().uuid().optional().nullable(),
+    ...agreementFields,
+    installments: agreementFields.installments.default(1),
+  })
+  .strict()
+  .refine((input) => input.amountPaid <= input.negotiatedPrice, { message: 'Valor pago não pode exceder o preço negociado', path: ['amountPaid'] });
+
+const updateAgreementSchema = z.object(agreementFields).partial().strict();
+
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+const MAX_DOCUMENTS_PER_ENROLLMENT = 20;
+// Assinatura binária confere o conteúdo real; o Content-Type do cliente não é confiável sozinho.
+const documentSignatures: Record<string, (buffer: Buffer) => boolean> = {
+  'application/pdf': (buffer) => buffer.subarray(0, 4).toString('latin1') === '%PDF',
+  'image/png': (buffer) => buffer.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])),
+  'image/jpeg': (buffer) => buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])),
+  'image/webp': (buffer) => buffer.subarray(0, 4).toString('latin1') === 'RIFF' && buffer.subarray(8, 12).toString('latin1') === 'WEBP',
+};
+const documentExtensions: Record<string, string> = { 'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+const rawDocumentParser = express.raw({ type: Object.keys(documentSignatures), limit: MAX_DOCUMENT_BYTES });
 
 export const buildInstructorCourseRoutes = (): Router => {
   const router = Router();
@@ -249,10 +286,223 @@ export const buildInstructorCourseRoutes = (): Router => {
           orderBy: { createdAt: 'desc' },
           skip: (page - 1) * pageSize,
           take: pageSize,
-          include: { user: { select: { id: true, name: true, email: true } }, class: { select: { id: true, name: true } } },
+          include: { user: { select: { id: true, name: true, email: true } }, class: { select: { id: true, name: true } }, agreement: { select: { id: true, _count: { select: { documents: true } } } } },
         }),
       ]);
       res.json({ success: true, page, pageSize, total, enrollments });
+    }),
+  );
+
+  router.get(
+    '/:courseId/pre-registrations',
+    requireCourseOwnership,
+    asyncHandler(async (req, res) => {
+      const parsed = paginationSchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError('Parâmetros de paginação inválidos', parsed.error.flatten());
+      const { page, pageSize } = parsed.data;
+      const where = { courseId: req.params.courseId };
+      const [total, preRegistrations] = await Promise.all([
+        prisma.coursePreRegistration.count({ where }),
+        prisma.coursePreRegistration.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        }),
+      ]);
+      res.json({ success: true, page, pageSize, total, preRegistrations });
+    }),
+  );
+
+  router.post(
+    '/:courseId/pre-registrations/:preRegistrationId/convert',
+    requireCourseOwnership,
+    asyncHandler(async (req, res) => {
+      const parsed = convertPreRegistrationSchema.safeParse(req.body);
+      if (!parsed.success) throw new ValidationError('Dados da matrícula inválidos', parsed.error.flatten());
+      const input = parsed.data;
+      const courseId = req.params.courseId as string;
+
+      const result = await prisma.$transaction(async (tx) => {
+        const registration = await tx.coursePreRegistration.findFirst({ where: { id: req.params.preRegistrationId, courseId } });
+        if (!registration) throw new NotFoundError('Pré-inscrição não encontrada');
+        // updateMany condicional evita dupla conversão em requisições concorrentes.
+        const claimed = await tx.coursePreRegistration.updateMany({ where: { id: registration.id, convertedAt: null }, data: { convertedAt: new Date() } });
+        if (claimed.count === 0) throw new ConflictError('Esta pré-inscrição já foi convertida em matrícula');
+
+        if (input.classId) {
+          const courseClass = await tx.courseClass.findFirst({ where: { id: input.classId, courseId }, include: { _count: { select: { enrollments: true } } } });
+          if (!courseClass) throw new ValidationError('Turma inválida para este curso');
+          if (courseClass._count.enrollments >= courseClass.capacity) throw new ConflictError('A turma selecionada não possui vagas');
+        }
+
+        const email = registration.email.trim().toLowerCase();
+        const user = (await tx.user.findUnique({ where: { email } }))
+          ?? (await tx.user.create({ data: { email, name: input.name, phone: registration.phone, role: UserRole.STUDENT, password: null, isActive: true } }));
+
+        const existing = await tx.enrollment.findUnique({ where: { userId_courseId: { userId: user.id, courseId } } });
+        if (existing) throw new ConflictError('Este aluno já possui matrícula neste curso');
+
+        const enrollment = await tx.enrollment.create({
+          data: { userId: user.id, courseId, classId: input.classId ?? null, status: EnrollmentStatus.ACTIVE, startedAt: new Date() },
+        });
+        const agreement = await tx.enrollmentAgreement.create({
+          data: {
+            enrollmentId: enrollment.id,
+            preRegistrationId: registration.id,
+            negotiatedPrice: new Prisma.Decimal(input.negotiatedPrice),
+            paymentMethod: input.paymentMethod,
+            installments: input.installments,
+            amountPaid: new Prisma.Decimal(input.amountPaid),
+            notes: input.notes || null,
+            createdById: req.auth!.id,
+          },
+        });
+        return { enrollment, agreement, user };
+      });
+
+      const course = await prisma.course.findUniqueOrThrow({ where: { id: courseId }, select: { title: true } });
+      const emailSent = result.user.password
+        ? await sendEnrollmentConfirmation(result.user, course.title)
+        : await sendAccessInvite(result.user, course.title);
+
+      await audit(req, 'PRE_REGISTRATION_CONVERTED', 'Enrollment', result.enrollment.id, { enrollment: result.enrollment, agreement: result.agreement, emailSent });
+      res.status(201).json({
+        success: true,
+        emailSent,
+        enrollment: result.enrollment,
+        agreement: { ...result.agreement, negotiatedPrice: result.agreement.negotiatedPrice.toString(), amountPaid: result.agreement.amountPaid.toString() },
+      });
+    }),
+  );
+
+  router.post(
+    '/:courseId/enrollments/:enrollmentId/invite',
+    requireCourseOwnership,
+    requireEnrollmentOwnership,
+    sensitiveRateLimiter,
+    asyncHandler(async (req, res) => {
+      const enrollment = await prisma.enrollment.findUniqueOrThrow({
+        where: { id: req.params.enrollmentId },
+        include: { user: { select: { id: true, name: true, email: true, password: true, isActive: true } }, course: { select: { title: true } } },
+      });
+      if (enrollment.user.password) throw new ConflictError('Este aluno já definiu uma senha de acesso');
+      if (!enrollment.user.isActive) throw new ConflictError('A conta deste aluno está inativa');
+      const emailSent = await sendAccessInvite(enrollment.user, enrollment.course.title);
+      await audit(req, 'ENROLLMENT_INVITE_SENT', 'Enrollment', enrollment.id, { userId: enrollment.user.id, emailSent });
+      if (!emailSent) throw new AppError('Não foi possível enviar o convite por e-mail', 502, 'EMAIL_FAILED');
+      res.json({ success: true });
+    }),
+  );
+
+  router.patch(
+    '/:courseId/enrollments/:enrollmentId/agreement',
+    requireCourseOwnership,
+    requireEnrollmentOwnership,
+    asyncHandler(async (req, res) => {
+      const parsed = updateAgreementSchema.safeParse(req.body);
+      if (!parsed.success) throw new ValidationError('Dados da negociação inválidos', parsed.error.flatten());
+      const before = await prisma.enrollmentAgreement.findUnique({ where: { enrollmentId: req.params.enrollmentId } });
+      if (!before) throw new NotFoundError('Esta matrícula não possui dados de negociação');
+      const input = parsed.data;
+      const negotiatedPrice = input.negotiatedPrice ?? Number(before.negotiatedPrice);
+      const amountPaid = input.amountPaid ?? Number(before.amountPaid);
+      if (amountPaid > negotiatedPrice) throw new ValidationError('Valor pago não pode exceder o preço negociado');
+      const updated = await prisma.enrollmentAgreement.update({
+        where: { id: before.id },
+        data: {
+          negotiatedPrice: input.negotiatedPrice === undefined ? undefined : new Prisma.Decimal(input.negotiatedPrice),
+          amountPaid: input.amountPaid === undefined ? undefined : new Prisma.Decimal(input.amountPaid),
+          paymentMethod: input.paymentMethod,
+          installments: input.installments,
+          notes: input.notes === undefined ? undefined : input.notes || null,
+        },
+      });
+      await audit(req, 'ENROLLMENT_AGREEMENT_UPDATED', 'EnrollmentAgreement', updated.id, updated, before);
+      res.json({ success: true });
+    }),
+  );
+
+  router.delete(
+    '/:courseId/enrollments/:enrollmentId/documents/:documentId',
+    requireCourseOwnership,
+    requireEnrollmentOwnership,
+    asyncHandler(async (req, res) => {
+      const document = await prisma.enrollmentDocument.findFirst({ where: { id: req.params.documentId, agreement: { enrollmentId: req.params.enrollmentId } } });
+      if (!document) throw new NotFoundError('Documento não encontrado');
+      await deleteFileFromStorage(document.storageKey);
+      await prisma.enrollmentDocument.delete({ where: { id: document.id } });
+      await audit(req, 'ENROLLMENT_DOCUMENT_DELETED', 'EnrollmentDocument', document.id, { deleted: true }, document);
+      res.json({ success: true });
+    }),
+  );
+
+  router.get(
+    '/:courseId/enrollments/:enrollmentId/agreement',
+    requireCourseOwnership,
+    requireEnrollmentOwnership,
+    asyncHandler(async (req, res) => {
+      const agreement = await prisma.enrollmentAgreement.findUnique({
+        where: { enrollmentId: req.params.enrollmentId },
+        include: {
+          createdBy: { select: { name: true } },
+          enrollment: { select: { user: { select: { password: true } } } },
+          documents: { orderBy: { createdAt: 'asc' }, select: { id: true, originalName: true, storageKey: true, mimeType: true, sizeBytes: true, createdAt: true } },
+        },
+      });
+      if (!agreement) throw new NotFoundError('Esta matrícula não possui dados de negociação');
+      res.json({
+        success: true,
+        agreement: {
+          id: agreement.id,
+          negotiatedPrice: agreement.negotiatedPrice.toString(),
+          amountPaid: agreement.amountPaid.toString(),
+          paymentMethod: agreement.paymentMethod,
+          installments: agreement.installments,
+          notes: agreement.notes,
+          createdAt: agreement.createdAt,
+          createdBy: agreement.createdBy.name,
+          studentHasAccess: Boolean(agreement.enrollment.user.password),
+          documents: agreement.documents.map(({ storageKey, ...document }) => ({
+            ...document,
+            url: buildPublicS3Url(storageKey, env.storage.region, env.storage.bucket),
+          })),
+        },
+      });
+    }),
+  );
+
+  router.post(
+    '/:courseId/enrollments/:enrollmentId/documents',
+    requireCourseOwnership,
+    requireEnrollmentOwnership,
+    rawDocumentParser,
+    asyncHandler(async (req, res) => {
+      const mimeType = (req.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+      const buffer = req.body as unknown;
+      if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new ValidationError('Envie um arquivo PDF, JPG, PNG ou WEBP');
+      const matchesSignature = documentSignatures[mimeType];
+      if (!matchesSignature || !matchesSignature(buffer)) throw new ValidationError('Conteúdo do arquivo não corresponde a um tipo permitido');
+
+      const rawName = typeof req.query.fileName === 'string' ? req.query.fileName : '';
+      const originalName = rawName.trim().slice(0, 200) || `documento.${documentExtensions[mimeType]}`;
+
+      const agreement = await prisma.enrollmentAgreement.findUnique({
+        where: { enrollmentId: req.params.enrollmentId },
+        include: { _count: { select: { documents: true } } },
+      });
+      if (!agreement) throw new ConflictError('Documentos só podem ser anexados a matrículas manuais');
+      if (agreement._count.documents >= MAX_DOCUMENTS_PER_ENROLLMENT) throw new ConflictError('Limite de documentos atingido para esta matrícula');
+
+      // Nome original nunca compõe a chave: evita path traversal e colisões.
+      const storageKey = `enrollment-documents/${req.params.courseId}/${agreement.enrollmentId}/${randomUUID()}.${documentExtensions[mimeType]}`;
+      await uploadFileToStorage({ key: storageKey, buffer, contentType: mimeType });
+      const document = await prisma.enrollmentDocument.create({
+        data: { agreementId: agreement.id, uploadedById: req.auth!.id, originalName, storageKey, mimeType, sizeBytes: buffer.length },
+        select: { id: true, originalName: true, mimeType: true, sizeBytes: true, createdAt: true },
+      });
+      await audit(req, 'ENROLLMENT_DOCUMENT_UPLOADED', 'EnrollmentDocument', document.id, document);
+      res.status(201).json({ success: true, document });
     }),
   );
 
@@ -279,22 +529,26 @@ export const buildInstructorCourseRoutes = (): Router => {
     requireCourseOwnership,
     sensitiveRateLimiter,
     asyncHandler(async (req, res) => {
-      const enrollments = await prisma.enrollment.findMany({
-        where: { courseId: req.params.courseId },
-        orderBy: { createdAt: 'desc' },
-        include: { user: { select: { name: true, email: true } }, class: { select: { name: true } } },
-      });
+      const [enrollments, preRegistrations] = await Promise.all([
+        prisma.enrollment.findMany({
+          where: { courseId: req.params.courseId },
+          orderBy: { createdAt: 'desc' },
+          include: { user: { select: { name: true, email: true } }, class: { select: { name: true } } },
+        }),
+        prisma.coursePreRegistration.findMany({ where: { courseId: req.params.courseId }, orderBy: { createdAt: 'desc' } }),
+      ]);
       const csv = toCsv(
-        ['Nome', 'Email', 'Turma', 'Status', 'Progresso (%)', 'Início', 'Conclusão'],
-        enrollments.map((enrollment) => [
-          enrollment.user.name,
-          enrollment.user.email,
-          enrollment.class?.name ?? '',
-          enrollment.status,
-          enrollment.progressPercent,
-          enrollment.startedAt?.toISOString() ?? '',
-          enrollment.completedAt?.toISOString() ?? '',
-        ]),
+        ['Tipo', 'Nome', 'Email', 'Telefone', 'Empresa', 'Turma', 'Status', 'Progresso (%)', 'Data'],
+        [
+          ...enrollments.map((enrollment) => [
+            'Matrícula', enrollment.user.name, enrollment.user.email, '', '', enrollment.class?.name ?? '', enrollment.status,
+            enrollment.progressPercent, enrollment.createdAt.toISOString(),
+          ]),
+          ...preRegistrations.map((registration) => [
+            'Pré-inscrição', registration.name ?? '', registration.email, registration.phone ?? '', registration.company ?? '', '',
+            'Pendente', '', registration.createdAt.toISOString(),
+          ]),
+        ],
       );
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="inscricoes-${req.params.courseId}.csv"`);
