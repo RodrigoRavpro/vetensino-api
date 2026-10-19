@@ -12,6 +12,7 @@ const checkoutSchema = z.object({
   classId: z.string().uuid(),
   name: z.string().trim().min(2).max(160),
   email: z.string().trim().email().max(240),
+  phone: z.string().trim().min(10).max(20).regex(/^\+?[\d\s().-]+$/).refine((value) => (value.match(/\d/g) ?? []).length >= 10 && (value.match(/\d/g) ?? []).length <= 15),
   cpf: z.string().trim().min(11).max(14).optional(),
   paymentMethod: z.enum(['PIX', 'CREDIT_CARD']).default('PIX'),
 });
@@ -49,8 +50,8 @@ export const buildCheckoutRoutes = (): Router => {
       // Checkout não pago aparece ao docente como pré-inscrição; nova tentativa do mesmo e-mail reaproveita o registro.
       const email = input.email.toLowerCase();
       const pending = await transaction.coursePreRegistration.findFirst({ where: { courseId: course.id, email, source: 'CHECKOUT', convertedAt: null } });
-      if (pending) await transaction.coursePreRegistration.update({ where: { id: pending.id }, data: { name: input.name, orderId: order.id } });
-      else await transaction.coursePreRegistration.create({ data: { courseId: course.id, name: input.name, email, source: 'CHECKOUT', orderId: order.id } });
+      if (pending) await transaction.coursePreRegistration.update({ where: { id: pending.id }, data: { name: input.name, phone: input.phone, orderId: order.id } });
+      else await transaction.coursePreRegistration.create({ data: { courseId: course.id, name: input.name, email, phone: input.phone, source: 'CHECKOUT', orderId: order.id } });
       return { kind: 'CHECKOUT' as const, orderId: order.id, paymentId: payment.id, publicId: order.publicId, total: order.total.toString(), reservationExpiresAt, className: courseClass.name, courseTitle: course.title };
     });
 
